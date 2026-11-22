@@ -169,6 +169,33 @@
             cursor: not-allowed;
         }
 
+        .upload-area {
+            padding: 12px 15px;
+            border-top: 1px solid #ddd;
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+
+        #uploadStatus {
+            font-size: 13px;
+            color: #263b60;
+        }
+
+        .memory-actions {
+            display: flex;
+            gap: 10px;
+            margin-top: 12px;
+            flex-wrap: wrap;
+        }
+
+        .memory-status {
+            margin-top: 10px;
+            font-size: 14px;
+            font-weight: bold;
+        }
+
         @media (max-width: 600px) {
             .container {
                 width: 100%;
@@ -181,33 +208,7 @@
                 max-width: 96%;
             }
         }
-    
-.upload-area {
-    padding: 12px 15px;
-    border-top: 1px solid #ddd;
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 10px;
-}
-
-#uploadStatus {
-    font-size: 13px;
-    color: #263b60;
-}
-.memory-actions {
-    display: flex;
-    gap: 10px;
-    margin-top: 12px;
-    flex-wrap: wrap;
-}
-
-.memory-status {
-    margin-top: 10px;
-    font-size: 14px;
-    font-weight: bold;
-}
-</style>
+    </style>
 </head>
 
 <body>
@@ -225,13 +226,15 @@
             </div>
         </div>
 
-        
-<div class="upload-area">
-    <input type="file" id="pdfFile" accept=".pdf">
-    <button onclick="uploadPDF()">Upload PDF</button>
-    <span id="uploadStatus"></span>
-</div>
-<div class="input-area">
+        <!-- PDF Upload -->
+        <div class="upload-area">
+            <input type="file" id="pdfFile" accept=".pdf">
+            <button onclick="uploadPDF()">Upload PDF</button>
+            <span id="uploadStatus"></span>
+        </div>
+
+        <!-- Chat Input -->
+        <div class="input-area">
             <input
                 type="text"
                 id="userInput"
@@ -242,15 +245,16 @@
 
     </div>
 
-   
 <script>
     // Configure Markdown
     marked.setOptions({
         gfm: true,
         breaks: true
     });
+
     // Store conversation history
     let conversationHistory = [];
+
     // PDF Upload Function
     async function uploadPDF() {
         const fileInput = document.getElementById("pdfFile");
@@ -280,17 +284,7 @@
             });
 
             const data = await response.json();
-            // Save current conversation turn
-conversationHistory.push(
-    { role: "user", content: message },
-    { role: "assistant", content: data.reply || "No response received." }
-);
 
-// Keep only the latest 10 messages
-conversationHistory = conversationHistory.slice(-10);
-
-console.log("Conversation History:", conversationHistory);
-           
             if (!response.ok || data.error) {
                 throw new Error(data.error || "Upload failed.");
             }
@@ -301,7 +295,8 @@ console.log("Conversation History:", conversationHistory);
             fileInput.value = "";
 
         } catch (error) {
-            status.textContent = error.message;
+            console.error("Upload Error:", error);
+            status.textContent = "Error: " + error.message;
         }
     }
 
@@ -327,24 +322,17 @@ console.log("Conversation History:", conversationHistory);
             });
 
             const data = await response.json();
-            // Save current conversation turn
-            conversationHistory.push(
-               { role: "user", content: message },
-               { role: "assistant", content: data.reply || "No response received." }
-    );
-
-           // Keep only the latest 10 messages
-           conversationHistory = conversationHistory.slice(-10);
 
             if (!response.ok) {
                 throw new Error(data.message || "Memory update failed.");
             }
 
-            statusDiv.textContent = data.message;
+            statusDiv.textContent = data.message || "Memory updated successfully.";
             actionsDiv.remove();
 
         } catch (error) {
-            statusDiv.textContent = error.message;
+            console.error("Memory Error:", error);
+            statusDiv.textContent = "Error: " + error.message;
             buttons.forEach(button => button.disabled = false);
         }
     }
@@ -381,9 +369,9 @@ console.log("Conversation History:", conversationHistory);
                     "Content-Type": "application/json"
                 },
                 body: JSON.stringify({
-                  message: message,
-                  conversation_history: conversationHistory
-})
+                    message: message,
+                    conversation_history: conversationHistory
+                })
             });
 
             if (!response.ok) {
@@ -391,16 +379,20 @@ console.log("Conversation History:", conversationHistory);
             }
 
             const data = await response.json();
+
             // Save current conversation turn
             conversationHistory.push(
-                 { role: "user", content: message },
-                 { role: "assistant", content: data.reply || "No response received." }
-        );
+                { role: "user", content: message },
+                {
+                    role: "assistant",
+                    content: data.reply || "No response received."
+                }
+            );
 
-// Keep only the latest 10 messages
-conversationHistory = conversationHistory.slice(-10);
+            // Keep only the latest 10 messages
+            conversationHistory = conversationHistory.slice(-10);
 
-console.log("Conversation History:", conversationHistory);
+            console.log("Conversation History:", conversationHistory);
 
             botDiv.innerHTML = marked.parse(
                 data.reply || "No response received."
@@ -453,8 +445,8 @@ console.log("Conversation History:", conversationHistory);
 
         } catch (error) {
             console.error("Chat Error:", error);
-            botDiv.textContent =
-                "Error: " + error.message;
+            botDiv.textContent = "Error: " + error.message;
+
         } finally {
             button.disabled = false;
             input.focus();

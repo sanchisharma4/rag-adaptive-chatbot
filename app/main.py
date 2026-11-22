@@ -1,6 +1,8 @@
+
 import sqlite3
 from datetime import datetime
 import os
+import math
 import uuid
 from pathlib import Path
 
@@ -10,9 +12,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from google import genai
+from google.genai import types
 from pypdf import PdfReader
-from sentence_transformers import SentenceTransformer, util
 import chromadb
+
 
 # Project folder
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -25,6 +28,64 @@ API_KEY = os.getenv("GEMINI_API_KEY")
 client = genai.Client(api_key=API_KEY) if API_KEY else None
 
 
+# Gemini embedding helper
+def get_embeddings(texts, task_type="RETRIEVAL_DOCUMENT"):
+    if client is None:
+        raise RuntimeError("Gemini API key is not configured.")
+
+    if isinstance(texts, str):
+        texts = [texts]
+
+    all_embeddings = []
+
+    # Process texts in batches
+    for i in range(0, len(texts), 100):
+        batch = texts[i:i + 100]
+
+        response = client.models.embed_content(
+            model="gemini-embedding-001",
+            contents=batch,
+            config=types.EmbedContentConfig(
+                task_type=task_type,
+                output_dimensionality=768
+            )
+        )
+
+        all_embeddings.extend(
+            [item.values for item in response.embeddings]
+        )
+
+    return all_embeddings
+
+
+# Calculate cosine similarity
+def cosine_similarity_scores(query_embedding, embeddings):
+    query_norm = math.sqrt(
+        sum(value * value for value in query_embedding)
+    )
+
+    scores = []
+
+    for embedding in embeddings:
+        embedding_norm = math.sqrt(
+            sum(value * value for value in embedding)
+        )
+
+        if query_norm == 0 or embedding_norm == 0:
+            scores.append(0.0)
+            continue
+
+        dot_product = sum(
+            a * b for a, b in zip(query_embedding, embedding)
+        )
+
+        scores.append(
+            dot_product / (query_norm * embedding_norm)
+        )
+
+    return scores
+
+
 # Project storage folders
 UPLOAD_DIR = BASE_DIR / "uploads"
 CHROMA_DIR = BASE_DIR / "chroma_db"
@@ -32,22 +93,18 @@ CHROMA_DIR = BASE_DIR / "chroma_db"
 UPLOAD_DIR.mkdir(exist_ok=True)
 CHROMA_DIR.mkdir(exist_ok=True)
 
-# Initialize ChromaDB
+
+# Initialize ChromaDB with Gemini embeddings
 chroma_client = chromadb.PersistentClient(
     path=str(CHROMA_DIR)
 )
 
 collection = chroma_client.get_or_create_collection(
-    name="academic_documents"
+    name="academic_documents_gemini"
 )
 
-# Load embedding model
-embedding_model = SentenceTransformer(
-    "all-MiniLM-L6-v2"
-)
 
 # SQLite Adaptive Memory Database
-
 DB_PATH = BASE_DIR / "memory.db"
 
 
@@ -57,11 +114,9 @@ def get_db_connection():
     return connection
 
 
-
 def initialize_memory():
     connection = get_db_connection()
 
-    # Existing memories table
     connection.execute("""
         CREATE TABLE IF NOT EXISTS memories (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -71,7 +126,6 @@ def initialize_memory():
         )
     """)
 
-    # New pending memory updates table
     connection.execute("""
         CREATE TABLE IF NOT EXISTS pending_memory_updates (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -88,12 +142,13 @@ def initialize_memory():
 
 initialize_memory()
 
+
+# Save memory
 def save_memory(memory_text, memory_type="episodic"):
     connection = get_db_connection()
 
     memory_text = memory_text.strip()
 
-    # Check whether the same memory already exists
     existing_memory = connection.execute(
         """
         SELECT id FROM memories
@@ -106,7 +161,6 @@ def save_memory(memory_text, memory_type="episodic"):
     ).fetchone()
 
     if existing_memory:
-        # Update the existing memory
         connection.execute(
             """
             UPDATE memories
@@ -119,10 +173,10 @@ def save_memory(memory_text, memory_type="episodic"):
                 existing_memory["id"]
             )
         )
+
         print("Existing memory updated.")
 
     else:
-        # Save new memory
         connection.execute(
             """
             INSERT INTO memories (memory_text, memory_type, created_at)
@@ -134,12 +188,14 @@ def save_memory(memory_text, memory_type="episodic"):
                 datetime.now().isoformat()
             )
         )
+
         print("New memory saved.")
 
     connection.commit()
     connection.close()
 
 
+# Retrieve saved memories
 def get_memories(limit=10):
     connection = get_db_connection()
 
@@ -164,10 +220,13 @@ def get_memories(limit=10):
 
 
 # Phase 5: Find Similar Memories
-def find_similar_memory(memory_text, memory_type="semantic", threshold=0.80):
+def find_similar_memory(
+    memory_text,
+    memory_type="semantic",
+    threshold=0.80
+):
     memories = get_memories(limit=100)
 
-    # Consider only memories of the same type
     memories = [
         memory for memory in memories
         if memory["memory_type"] == memory_type
@@ -180,20 +239,27 @@ def find_similar_memory(memory_text, memory_type="semantic", threshold=0.80):
         memory["memory_text"] for memory in memories
     ]
 
-    new_embedding = embedding_model.encode(
-        memory_text, convert_to_tensor=True
-    )
-
-    existing_embeddings = embedding_model.encode(
-        memory_texts, convert_to_tensor=True
-    )
-
-    similarities = util.cos_sim(
-        new_embedding, existing_embeddings
+    new_embedding = get_embeddings(
+        memory_text,
+        task_type="SEMANTIC_SIMILARITY"
     )[0]
 
-    best_index = similarities.argmax().item()
-    best_score = similarities[best_index].item()
+    existing_embeddings = get_embeddings(
+        memory_texts,
+        task_type="SEMANTIC_SIMILARITY"
+    )
+
+    similarities = cosine_similarity_scores(
+        new_embedding,
+        existing_embeddings
+    )
+
+    best_index = max(
+        range(len(similarities)),
+        key=lambda i: similarities[i]
+    )
+
+    best_score = similarities[best_index]
 
     if best_score >= threshold:
         return {
@@ -202,10 +268,17 @@ def find_similar_memory(memory_text, memory_type="semantic", threshold=0.80):
         }
 
     return None
-def create_pending_memory_update(old_memory_text, new_memory_text, memory_type="semantic"):
+
+
+# Create pending memory update
+def create_pending_memory_update(
+    old_memory_text,
+    new_memory_text,
+    memory_type="semantic"
+):
     connection = get_db_connection()
 
-    cursor=connection.execute(
+    cursor = connection.execute(
         """
         INSERT INTO pending_memory_updates
         (old_memory_text, new_memory_text, memory_type, created_at)
@@ -218,11 +291,14 @@ def create_pending_memory_update(old_memory_text, new_memory_text, memory_type="
             datetime.now().isoformat()
         )
     )
+
     update_id = cursor.lastrowid
+
     connection.commit()
     connection.close()
 
     return update_id
+
 
 # Phase 5: Confirm or Reject Memory Update
 def resolve_pending_memory_update(update_id, approved):
@@ -241,16 +317,15 @@ def resolve_pending_memory_update(update_id, approved):
         return "Pending memory update not found."
 
     if approved:
-        # Update the existing memory
         connection.execute(
             """
             UPDATE memories
             SET memory_text = ?, created_at = ?
             WHERE id = (
-               SELECT id FROM memories
-               WHERE memory_text = ? AND memory_type = ?
-               ORDER BY id DESC
-               LIMIT 1
+                SELECT id FROM memories
+                WHERE memory_text = ? AND memory_type = ?
+                ORDER BY id DESC
+                LIMIT 1
             )
             """,
             (
@@ -261,7 +336,6 @@ def resolve_pending_memory_update(update_id, approved):
             )
         )
 
-    # Remove the pending request after decision
     connection.execute(
         "DELETE FROM pending_memory_updates WHERE id = ?",
         (update_id,)
@@ -275,8 +349,13 @@ def resolve_pending_memory_update(update_id, approved):
 
     return "Previous memory kept unchanged."
 
+
 # Phase 4: Adaptive Memory Retrieval
-def retrieve_relevant_memories(query, limit=5, threshold=0.35):
+def retrieve_relevant_memories(
+    query,
+    limit=5,
+    threshold=0.35
+):
     memories = get_memories(limit=100)
 
     if not memories:
@@ -295,64 +374,29 @@ def retrieve_relevant_memories(query, limit=5, threshold=0.35):
         memory["memory_text"] for memory in memories
     ]
 
-    query_embedding = embedding_model.encode(
-        query, convert_to_tensor=True
-    )
-
-    memory_embeddings = embedding_model.encode(
-        memory_texts, convert_to_tensor=True
-    )
-
-    similarities = util.cos_sim(
-        query_embedding, memory_embeddings
+    query_embedding = get_embeddings(
+        query,
+        task_type="SEMANTIC_SIMILARITY"
     )[0]
+
+    memory_embeddings = get_embeddings(
+        memory_texts,
+        task_type="SEMANTIC_SIMILARITY"
+    )
+
+    similarities = cosine_similarity_scores(
+        query_embedding,
+        memory_embeddings
+    )
 
     relevant_memories = []
 
     for index, score in enumerate(similarities):
-        if score.item() >= threshold:
+        if score >= threshold:
             relevant_memories.append({
                 "memory_text": memory_texts[index],
                 "memory_type": memories[index]["memory_type"],
-                "similarity": round(score.item(), 3)
-            })
-
-    relevant_memories.sort(
-        key=lambda item: item["similarity"],
-        reverse=True
-    )
-
-    return relevant_memories[:limit]
-
-    memories = get_memories(limit=100)
-
-    if not memories:
-        return []
-
-    memory_texts = [
-        memory["memory_text"] for memory in memories
-    ]
-
-    query_embedding = embedding_model.encode(
-        query, convert_to_tensor=True
-    )
-
-    memory_embeddings = embedding_model.encode(
-        memory_texts, convert_to_tensor=True
-    )
-
-    similarities = util.cos_sim(
-        query_embedding, memory_embeddings
-    )[0]
-
-    relevant_memories = []
-
-    for index, score in enumerate(similarities):
-        if score.item() >= threshold:
-            relevant_memories.append({
-                "memory_text": memory_texts[index],
-                "memory_type": memories[index]["memory_type"],
-                "similarity": round(score.item(), 3)
+                "similarity": round(score, 3)
             })
 
     relevant_memories.sort(
@@ -363,9 +407,7 @@ def retrieve_relevant_memories(query, limit=5, threshold=0.35):
     return relevant_memories[:limit]
 
 
-
-
-
+# Classify memory
 def classify_memory(message):
     message = message.strip().lower()
 
@@ -407,7 +449,6 @@ def classify_memory(message):
         if pattern in message:
             return "semantic"
 
-    # Handle preference statements without "I"
     if message.startswith((
         "prefer ", "like ", "dislike ", "don't like "
     )):
@@ -416,9 +457,9 @@ def classify_memory(message):
     return None
 
 
-
 # Create FastAPI application
 app = FastAPI(title="RAG Adaptive Chatbot")
+
 
 # Serve frontend files
 app.mount(
@@ -431,24 +472,25 @@ app.mount(
 class ChatRequest(BaseModel):
     message: str
     conversation_history: list[dict] = []
+
+
 class MemoryUpdateRequest(BaseModel):
     update_id: int
     approved: bool
 
 
+# PDF Upload Endpoint
 @app.post("/upload")
 async def upload_pdf(file: UploadFile = File(...)):
 
-    # Check file type
-    if not file.filename.lower().endswith(".pdf"):
+    if not file.filename or not file.filename.lower().endswith(".pdf"):
         return {"error": "Only PDF files are allowed."}
 
-    try:
-        # Save uploaded PDF
-        file_id = str(uuid.uuid4())
-        safe_filename = f"{file_id}.pdf"
-        file_path = UPLOAD_DIR / safe_filename
+    file_id = str(uuid.uuid4())
+    safe_filename = f"{file_id}.pdf"
+    file_path = UPLOAD_DIR / safe_filename
 
+    try:
         content = await file.read()
 
         if not content:
@@ -457,7 +499,6 @@ async def upload_pdf(file: UploadFile = File(...)):
         with open(file_path, "wb") as f:
             f.write(content)
 
-        # Extract PDF text
         reader = PdfReader(str(file_path))
 
         chunks = []
@@ -465,7 +506,6 @@ async def upload_pdf(file: UploadFile = File(...)):
         for page_number, page in enumerate(reader.pages):
             page_text = page.extract_text() or ""
 
-            # Divide text into chunks
             words = page_text.split()
 
             for i in range(0, len(words), 150):
@@ -479,18 +519,22 @@ async def upload_pdf(file: UploadFile = File(...)):
 
         if not chunks:
             file_path.unlink(missing_ok=True)
+
             return {
                 "error": "No readable text found. This PDF may be scanned."
             }
 
-        # Generate embeddings
-        texts = [chunk["text"] for chunk in chunks]
+        # Generate Gemini document embeddings
+        texts = [
+            chunk["text"] for chunk in chunks
+        ]
 
-        embeddings = embedding_model.encode(
-            texts
-        ).tolist()
+        embeddings = get_embeddings(
+            texts,
+            task_type="RETRIEVAL_DOCUMENT"
+        )
 
-        # Store in ChromaDB
+        # Store documents in ChromaDB
         collection.add(
             ids=[
                 f"{file_id}_{i}"
@@ -516,28 +560,37 @@ async def upload_pdf(file: UploadFile = File(...)):
 
     except Exception as e:
         print("PDF Upload Error:", e)
-        return {"error": "Unable to process this PDF."}
+        file_path.unlink(missing_ok=True)
+
+        return {
+            "error": "Unable to process this PDF. Check the terminal."
+        }
+
+
+# Home Endpoint
 @app.get("/")
 def home():
-    return FileResponse(BASE_DIR / "static" / "index.html")
+    return FileResponse(
+        BASE_DIR / "static" / "index.html"
+    )
 
 
-
-
-
-
+# Chat Endpoint
 @app.post("/chat")
 def chat(request: ChatRequest):
+
     user_message = request.message.strip()
 
     if not user_message:
         return {"reply": "Please enter a message."}
 
     if not client:
-        return {"reply": "API key not found. Please check your .env file."}
+        return {
+            "reply": "API key not found. Please check your .env file."
+        }
 
     try:
-        # Retrieve relevant memories using semantic similarity
+        # Retrieve relevant memories
         memories = retrieve_relevant_memories(
             user_message,
             limit=5,
@@ -551,37 +604,49 @@ def chat(request: ChatRequest):
             ]
         )
 
-        # Search uploaded documents
-        query_embedding = embedding_model.encode(
-            [user_message]
-        ).tolist()
+        # Search uploaded documents using Gemini embeddings
+        query_embedding = get_embeddings(
+            user_message,
+            task_type="RETRIEVAL_QUERY"
+        )
 
         results = collection.query(
             query_embeddings=query_embedding,
             n_results=3
         )
 
-        retrieved_chunks = results.get("documents", [[]])[0]
+        retrieved_chunks = results.get(
+            "documents", [[]]
+        )[0]
 
         if retrieved_chunks:
             context = "\n\n".join(retrieved_chunks)
         else:
             context = "No relevant uploaded document found."
-                # Prepare recent conversation history
+
+        # Prepare recent conversation history
         history_lines = []
 
         for item in request.conversation_history[-10:]:
             role = item.get("role")
             content = item.get("content", "")
 
-            if role in ["user", "assistant"] and isinstance(content, str):
+            if (
+                role in ["user", "assistant"]
+                and isinstance(content, str)
+            ):
                 history_lines.append(
                     f"{role}: {content[:2000]}"
                 )
 
         conversation_context = "\n".join(history_lines)
-        print("DEBUG - Conversation context:", conversation_context)
-        # Create prompt using memory and document context
+
+        print(
+            "DEBUG - Conversation context:",
+            conversation_context
+        )
+
+        # Create prompt
         prompt = f"""
         You are a helpful academic assistant with memory.
 
@@ -617,12 +682,18 @@ def chat(request: ChatRequest):
         Do not invent facts.
         """
 
-
         # Classify and save current user message
         memory_type = classify_memory(user_message)
 
-        print("DEBUG - User message:", repr(user_message))
-        print("DEBUG - Memory type:", memory_type)
+        print(
+            "DEBUG - User message:",
+            repr(user_message)
+        )
+
+        print(
+            "DEBUG - Memory type:",
+            memory_type
+        )
 
         if memory_type is not None:
 
@@ -654,7 +725,10 @@ def chat(request: ChatRequest):
                     "requires_confirmation": True
                 }
 
-            save_memory(user_message, memory_type=memory_type)
+            save_memory(
+                user_message,
+                memory_type=memory_type
+            )
 
         # Generate Gemini response
         response = client.models.generate_content(
@@ -668,10 +742,13 @@ def chat(request: ChatRequest):
 
     except Exception as e:
         print("Chat Error:", e)
+
         return {
             "reply": "Sorry, something went wrong. Check the terminal."
         }
 
+
+# Confirm Memory Update Endpoint
 @app.post("/memory/confirm")
 def confirm_memory_update(request: MemoryUpdateRequest):
 
