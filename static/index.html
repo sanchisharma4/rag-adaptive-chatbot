@@ -1,0 +1,475 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RAG Adaptive Chatbot</title>
+
+    <!-- Markdown and code formatting libraries -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <link rel="stylesheet"
+          href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/github-dark.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
+
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            font-family: Arial, sans-serif;
+            background: #eef2f7;
+        }
+
+        .container {
+            max-width: 850px;
+            height: 90vh;
+            margin: 5vh auto;
+            background: white;
+            border-radius: 12px;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 4px 15px #0002;
+            overflow: hidden;
+        }
+
+        header {
+            background: #263b60;
+            color: white;
+            padding: 20px;
+            text-align: center;
+        }
+
+        header h2 {
+            margin: 0 0 8px;
+        }
+
+        header p {
+            margin: 0;
+        }
+
+        #messages {
+            flex: 1;
+            padding: 20px;
+            overflow-y: auto;
+        }
+
+        .message {
+            padding: 14px 18px;
+            margin: 12px 0;
+            border-radius: 10px;
+            max-width: 90%;
+            line-height: 1.7;
+            overflow-wrap: anywhere;
+        }
+
+        .user {
+            background: #dceafe;
+            margin-left: auto;
+            white-space: pre-wrap;
+        }
+
+        .bot {
+            background: #f1f3f6;
+            margin-right: auto;
+        }
+
+        /* Markdown formatting */
+        .bot h1, .bot h2, .bot h3 {
+            color: #263b60;
+            margin-top: 18px;
+            margin-bottom: 10px;
+        }
+
+        .bot p {
+            margin: 10px 0;
+        }
+
+        .bot ul, .bot ol {
+            padding-left: 25px;
+            margin: 10px 0;
+        }
+
+        .bot li {
+            margin-bottom: 6px;
+        }
+
+        .bot strong {
+            color: #263b60;
+        }
+
+        .bot code {
+            background: #e2e8f0;
+            padding: 3px 6px;
+            border-radius: 4px;
+            font-family: Consolas, monospace;
+        }
+
+        .bot pre {
+            background: #1e293b;
+            padding: 15px;
+            border-radius: 8px;
+            overflow-x: auto;
+        }
+
+        .bot pre code {
+            background: transparent;
+            color: #f8fafc;
+            padding: 0;
+            font-size: 13px;
+        }
+
+        .bot blockquote {
+            border-left: 4px solid #263b60;
+            padding-left: 12px;
+            color: #555;
+            margin-left: 0;
+        }
+
+        .bot table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 12px 0;
+        }
+
+        .bot th, .bot td {
+            border: 1px solid #ccc;
+            padding: 8px;
+            text-align: left;
+        }
+
+        .input-area {
+            display: flex;
+            padding: 15px;
+            gap: 10px;
+            border-top: 1px solid #ddd;
+        }
+
+        input {
+            flex: 1;
+            padding: 12px;
+            border: 1px solid #ccc;
+            border-radius: 8px;
+            min-width: 0;
+        }
+
+        button {
+            background: #263b60;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            padding: 12px 20px;
+            cursor: pointer;
+        }
+
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        @media (max-width: 600px) {
+            .container {
+                width: 100%;
+                height: 100vh;
+                margin: 0;
+                border-radius: 0;
+            }
+
+            .message {
+                max-width: 96%;
+            }
+        }
+    
+.upload-area {
+    padding: 12px 15px;
+    border-top: 1px solid #ddd;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+#uploadStatus {
+    font-size: 13px;
+    color: #263b60;
+}
+.memory-actions {
+    display: flex;
+    gap: 10px;
+    margin-top: 12px;
+    flex-wrap: wrap;
+}
+
+.memory-status {
+    margin-top: 10px;
+    font-size: 14px;
+    font-weight: bold;
+}
+</style>
+</head>
+
+<body>
+    <div class="container">
+
+        <header>
+            <h2>RAG Adaptive Chatbot</h2>
+            <p>Your Personal Academic Assistant</p>
+        </header>
+
+        <div id="messages">
+            <div class="message bot">
+                Hello! Welcome to your personal academic assistant.
+                How can I help you today?
+            </div>
+        </div>
+
+        
+<div class="upload-area">
+    <input type="file" id="pdfFile" accept=".pdf">
+    <button onclick="uploadPDF()">Upload PDF</button>
+    <span id="uploadStatus"></span>
+</div>
+<div class="input-area">
+            <input
+                type="text"
+                id="userInput"
+                placeholder="Ask something..."
+            >
+            <button id="sendButton" onclick="sendMessage()">Send</button>
+        </div>
+
+    </div>
+
+   
+<script>
+    // Configure Markdown
+    marked.setOptions({
+        gfm: true,
+        breaks: true
+    });
+    // Store conversation history
+    let conversationHistory = [];
+    // PDF Upload Function
+    async function uploadPDF() {
+        const fileInput = document.getElementById("pdfFile");
+        const status = document.getElementById("uploadStatus");
+
+        if (!fileInput.files.length) {
+            status.textContent = "Please select a PDF first.";
+            return;
+        }
+
+        const file = fileInput.files[0];
+
+        if (!file.name.toLowerCase().endsWith(".pdf")) {
+            status.textContent = "Please select a PDF file.";
+            return;
+        }
+
+        const formData = new FormData();
+        formData.append("file", file);
+
+        status.textContent = "Uploading and processing PDF...";
+
+        try {
+            const response = await fetch("/upload", {
+                method: "POST",
+                body: formData
+            });
+
+            const data = await response.json();
+            // Save current conversation turn
+conversationHistory.push(
+    { role: "user", content: message },
+    { role: "assistant", content: data.reply || "No response received." }
+);
+
+// Keep only the latest 10 messages
+conversationHistory = conversationHistory.slice(-10);
+
+console.log("Conversation History:", conversationHistory);
+           
+            if (!response.ok || data.error) {
+                throw new Error(data.error || "Upload failed.");
+            }
+
+            status.textContent =
+                "Uploaded successfully! Chunks: " + data.chunks_created;
+
+            fileInput.value = "";
+
+        } catch (error) {
+            status.textContent = error.message;
+        }
+    }
+
+    // Memory Confirmation Function
+    async function confirmMemoryUpdate(
+        updateId, approved, actionsDiv, statusDiv
+    ) {
+        const buttons = actionsDiv.querySelectorAll("button");
+
+        buttons.forEach(button => button.disabled = true);
+        statusDiv.textContent = "Processing your choice...";
+
+        try {
+            const response = await fetch("/memory/confirm", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    update_id: updateId,
+                    approved: approved
+                })
+            });
+
+            const data = await response.json();
+            // Save current conversation turn
+            conversationHistory.push(
+               { role: "user", content: message },
+               { role: "assistant", content: data.reply || "No response received." }
+    );
+
+           // Keep only the latest 10 messages
+           conversationHistory = conversationHistory.slice(-10);
+
+            if (!response.ok) {
+                throw new Error(data.message || "Memory update failed.");
+            }
+
+            statusDiv.textContent = data.message;
+            actionsDiv.remove();
+
+        } catch (error) {
+            statusDiv.textContent = error.message;
+            buttons.forEach(button => button.disabled = false);
+        }
+    }
+
+    // Chat Function
+    async function sendMessage() {
+        const input = document.getElementById("userInput");
+        const button = document.getElementById("sendButton");
+        const message = input.value.trim();
+
+        if (!message) return;
+
+        const messages = document.getElementById("messages");
+
+        const userDiv = document.createElement("div");
+        userDiv.className = "message user";
+        userDiv.textContent = message;
+        messages.appendChild(userDiv);
+
+        input.value = "";
+        button.disabled = true;
+
+        const botDiv = document.createElement("div");
+        botDiv.className = "message bot";
+        botDiv.textContent = "Thinking...";
+        messages.appendChild(botDiv);
+
+        messages.scrollTop = messages.scrollHeight;
+
+        try {
+            const response = await fetch("/chat", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                  message: message,
+                  conversation_history: conversationHistory
+})
+            });
+
+            if (!response.ok) {
+                throw new Error("Server error: " + response.status);
+            }
+
+            const data = await response.json();
+            // Save current conversation turn
+            conversationHistory.push(
+                 { role: "user", content: message },
+                 { role: "assistant", content: data.reply || "No response received." }
+        );
+
+// Keep only the latest 10 messages
+conversationHistory = conversationHistory.slice(-10);
+
+console.log("Conversation History:", conversationHistory);
+
+            botDiv.innerHTML = marked.parse(
+                data.reply || "No response received."
+            );
+
+            // Highlight code blocks
+            botDiv.querySelectorAll("pre code").forEach(block => {
+                hljs.highlightElement(block);
+            });
+
+            // Display memory confirmation buttons
+            if (data.requires_confirmation === true) {
+
+                const actionsDiv = document.createElement("div");
+                actionsDiv.className = "memory-actions";
+
+                const approveButton = document.createElement("button");
+                approveButton.textContent = "Approve Update";
+
+                const rejectButton = document.createElement("button");
+                rejectButton.textContent = "Keep Old Memory";
+
+                const statusDiv = document.createElement("div");
+                statusDiv.className = "memory-status";
+
+                approveButton.addEventListener("click", () => {
+                    confirmMemoryUpdate(
+                        data.pending_update_id,
+                        true,
+                        actionsDiv,
+                        statusDiv
+                    );
+                });
+
+                rejectButton.addEventListener("click", () => {
+                    confirmMemoryUpdate(
+                        data.pending_update_id,
+                        false,
+                        actionsDiv,
+                        statusDiv
+                    );
+                });
+
+                actionsDiv.appendChild(approveButton);
+                actionsDiv.appendChild(rejectButton);
+
+                botDiv.appendChild(actionsDiv);
+                botDiv.appendChild(statusDiv);
+            }
+
+        } catch (error) {
+            console.error("Chat Error:", error);
+            botDiv.textContent =
+                "Error: " + error.message;
+        } finally {
+            button.disabled = false;
+            input.focus();
+            messages.scrollTop = messages.scrollHeight;
+        }
+    }
+
+    // Send message when Enter is pressed
+    document.getElementById("userInput")
+        .addEventListener("keydown", function(event) {
+            if (event.key === "Enter") {
+                sendMessage();
+            }
+        });
+</script>
+
+</body>
+</html>

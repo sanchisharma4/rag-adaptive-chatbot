@@ -1,0 +1,19 @@
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Database and uploaded data
+memory.db
+memory_backup.db
+chroma_db/
+uploads/
+
+# IDE
+.vscode/
